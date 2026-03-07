@@ -57,3 +57,5 @@ there will be issue but lets try it out
 
 lets understand the iee format\
 *number* = (-1)<sup>sign</sup> × mantissa× 2<sup>exponent</sup>
+
+for my own sakes [E4M3 format docs](e4m3.md)
