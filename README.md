@@ -59,3 +59,12 @@ lets understand the iee format\
 *number* = (-1)<sup>sign</sup> × mantissa× 2<sup>exponent</sup>
 
 for my own sakes [E4M3 format docs](e4m3.md)
+
+llm precision flow
+Operation          | Format  | Why
+-------------------|---------|---------------------------
+forward matmuls    | E4M3    | activations need precision
+backward matmuls   | E5M2    | gradients need range
+optimizer state    | FP32    | momentum/variance need both
+weight master copy | BF16    | range matches FP32
+layer norm / softmax | FP32  | numerically sensitive
