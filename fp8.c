@@ -1,6 +1,9 @@
 ///@file: fp8.c
 #include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <time.h>
+#include <stdlib.h>
 /**
 @note:
     E4M3 has small range and good precision, so we will use this for activation
@@ -107,6 +110,56 @@ f8 fp8_mul_precompt(f8 a, f8 b){
     return S | (E << 3) | mant;
 }
 
+/// Timing function for benchmarking
+long benchmark_ns(f8 (*func)(f8,f8), f8 a, f8 b, long iterations) {
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+
+    f8 result = 0;
+    for(long i = 0; i < iterations; i++) {
+        result ^= func(a,b); // prevent compiler optimizing away
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    long elapsed_ns = (end.tv_sec - start.tv_sec) * 1000000000L
+                    + (end.tv_nsec - start.tv_nsec);
+    printf("Dummy result: %d (to avoid optimization)\n", result);
+    return elapsed_ns;
+}
+
+long benchmark_ns_random(f8 (*func)(f8,f8), long iterations) {
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+
+    f8 result = 0;
+    for(long i = 0; i < iterations; i++) {
+        f8 a = rand() & 0xFF;  // random 8-bit value
+        f8 b = rand() & 0xFF;  // random 8-bit value
+        result ^= func(a,b);    // prevent compiler optimizing away
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    long elapsed_ns = (end.tv_sec - start.tv_sec) * 1000000000L
+                    + (end.tv_nsec - start.tv_nsec);
+    printf("Dummy result: %d\n", result);
+    return elapsed_ns;
+}
+
 int main() {
-    
+    srand(time(NULL));   // seed RNG
+
+    long iters = 10000000;  // 10 million
+    long t1 = benchmark_ns_random(mul, iters);
+    printf("mul took %ld ns for %ld iterations (avg %.2f ns)\n",
+           t1, iters, (double)t1/iters);
+
+    long t2 = benchmark_ns_random(fp8_mul, iters);
+    printf("fp8_mul took %ld ns for %ld iterations (avg %.2f ns)\n",
+           t2, iters, (double)t2/iters);
+
+    long t3 = benchmark_ns_random(fp8_mul_precompt, iters);
+    printf("fp8_mul_precompt took %ld ns for %ld iterations (avg %.2f ns)\n",
+           t3, iters, (double)t3/iters);
+
+    return 0;
 }
