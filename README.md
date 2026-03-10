@@ -68,3 +68,5 @@ backward matmuls   | E5M2    | gradients need range
 optimizer state    | FP32    | momentum/variance need both
 weight master copy | BF16    | range matches FP32
 layer norm / softmax | FP32  | numerically sensitive
+
+in the fp8 file, using a predefined 2d matrix to lookup was a AI idea so yea no credits to me in that.
