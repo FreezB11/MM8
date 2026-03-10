@@ -6,7 +6,7 @@
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <cuda_fp16.h>
-#include <math.h>
+#include <stdint.h>
 
 #define N 4096
 #define RUNS 10
@@ -29,9 +29,13 @@ int main()
 
     float *A32,*B32,*C32;
     __half *A16,*B16,*C16;
+    int8_t *A8,*B8;
+    int32_t *C8;
 
     size_t size32 = N*N*sizeof(float);
     size_t size16 = N*N*sizeof(__half);
+    size_t size8  = N*N*sizeof(int8_t);
+    size_t size32i = N*N*sizeof(int32_t);
 
     CHECK_CUDA(cudaMalloc(&A32,size32));
     CHECK_CUDA(cudaMalloc(&B32,size32));
@@ -41,12 +45,25 @@ int main()
     CHECK_CUDA(cudaMalloc(&B16,size16));
     CHECK_CUDA(cudaMalloc(&C16,size16));
 
+    CHECK_CUDA(cudaMalloc(&A8,size8));
+    CHECK_CUDA(cudaMalloc(&B8,size8));
+    CHECK_CUDA(cudaMalloc(&C8,size32i));
+
     float alpha=1.0f;
     float beta=0.0f;
+
+    int alpha_i = 1;
+    int beta_i  = 0;
 
     cudaEvent_t start,stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
+
+    float ms;
+
+    // ==========================
+    // FP32
+    // ==========================
 
     printf("\n===== FP32 GEMM =====\n");
 
@@ -73,16 +90,15 @@ int main()
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
 
-    float ms;
     cudaEventElapsedTime(&ms,start,stop);
-
     ms/=RUNS;
 
-    double gflops = flops(ms)/1e9;
-
     printf("Time: %f ms\n",ms);
-    printf("GFLOPS: %.2f\n",gflops);
+    printf("GFLOPS: %.2f\n", flops(ms)/1e9);
 
+    // ==========================
+    // FP16
+    // ==========================
 
     printf("\n===== FP16 GEMM (Tensor Core) =====\n");
 
@@ -116,14 +132,53 @@ int main()
     cudaEventSynchronize(stop);
 
     cudaEventElapsedTime(&ms,start,stop);
-
     ms/=RUNS;
 
-    gflops = flops(ms)/1e9;
+    printf("Time: %f ms\n",ms);
+    printf("GFLOPS: %.2f\n", flops(ms)/1e9);
+
+    // ==========================
+    // INT8
+    // ==========================
+
+    printf("\n===== INT8 GEMM (Tensor Core) =====\n");
+
+    for(int i=0;i<3;i++)
+        cublasGemmEx(handle,
+                     CUBLAS_OP_N,CUBLAS_OP_N,
+                     N,N,N,
+                     &alpha_i,
+                     A8,CUDA_R_8I,N,
+                     B8,CUDA_R_8I,N,
+                     &beta_i,
+                     C8,CUDA_R_32I,N,
+                     CUDA_R_32I,
+                     CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+
+    cudaEventRecord(start);
+
+    for(int i=0;i<RUNS;i++)
+        cublasGemmEx(handle,
+                     CUBLAS_OP_N,CUBLAS_OP_N,
+                     N,N,N,
+                     &alpha_i,
+                     A8,CUDA_R_8I,N,
+                     B8,CUDA_R_8I,N,
+                     &beta_i,
+                     C8,CUDA_R_32I,N,
+                     CUDA_R_32I,
+                     CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+
+    cudaEventElapsedTime(&ms,start,stop);
+    ms/=RUNS;
 
     printf("Time: %f ms\n",ms);
-    printf("GFLOPS: %.2f\n",gflops);
+    printf("GFLOPS: %.2f\n", flops(ms)/1e9);
 
+    // ==========================
 
     cudaFree(A32);
     cudaFree(B32);
@@ -132,6 +187,10 @@ int main()
     cudaFree(A16);
     cudaFree(B16);
     cudaFree(C16);
+
+    cudaFree(A8);
+    cudaFree(B8);
+    cudaFree(C8);
 
     cublasDestroy(handle);
 
@@ -147,10 +206,14 @@ int main()
 Matrix size: 4096 x 4096
 
 ===== FP32 GEMM =====
-Time: 25.242521 ms
-GFLOPS: 5444.74
+Time: 26.021374 ms
+GFLOPS: 5281.77
 
 ===== FP16 GEMM (Tensor Core) =====
-Time: 7.185613 ms
-GFLOPS: 19126.96
+Time: 7.233843 ms
+GFLOPS: 18999.44
+
+===== INT8 GEMM (Tensor Core) =====
+Time: 8.680755 ms
+GFLOPS: 15832.60
 */
