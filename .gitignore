@@ -4,3 +4,5 @@ e5m2
 matmul_fp8
 build/
 fp8
+bench
+test
