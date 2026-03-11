@@ -8,7 +8,7 @@
 #include <math.h>
 
 //global defined
-#define M 512
+#define M 4096
 #define TILE 32 // since this is int8 not float
 #define TILE3 64
 #define WPT 4// work per thread: each thread outputs wpt*wpt = 2x2 = 4 values
@@ -182,6 +182,73 @@ __global__ void mmul_k3(f8* A, f8* B, f8* C, int N){
     }
 }
 
+#define TL4 64
+#define WPT4 4
+__global__ void mmul_k4(f8* A, f8* B, f8* C, int N){
+    __shared__ float As[TL4][TL4+1];
+    __shared__ float Bs[TL4][TL4+1];
+
+    int tx=threadIdx.x, ty=threadIdx.y;  // each in [0, TL4/WPT4) = [0,16)
+    int row0=blockIdx.y*TL4 + ty*WPT4;
+    int col0=blockIdx.x*TL4 + tx*WPT4;
+
+    float sum[WPT4][WPT4]={};
+
+    int num_tiles=(N+TL4-1)/TL4;
+
+    for(int t=0; t<num_tiles; t++){
+
+        // load into shared mem using __ldg() — read-only cache path
+        #pragma unroll
+        for(int wr=0; wr<WPT4; wr++){
+            int a_row=row0+wr;
+            #pragma unroll
+            for(int wc=0; wc<WPT4; wc++){
+                int a_col=t*TL4+tx*WPT4+wc;
+                As[ty*WPT4+wr][tx*WPT4+wc] = (a_row<N && a_col<N)
+                    ? f8tof32(__ldg(&A[a_row*N+a_col])) : 0.0f;
+            }
+        }
+        #pragma unroll
+        for(int wr=0; wr<WPT4; wr++){
+            int b_row=t*TL4+ty*WPT4+wr;
+            #pragma unroll
+            for(int wc=0; wc<WPT4; wc++){
+                int b_col=col0+wc;
+                Bs[ty*WPT4+wr][tx*WPT4+wc] = (b_row<N && b_col<N)
+                    ? f8tof32(__ldg(&B[b_row*N+b_col])) : 0.0f;
+            }
+        }
+
+        __syncthreads();
+
+        // 1024 float MACs per thread — compiler maps to FMA instructions
+        #pragma unroll
+        for(int k=0; k<TL4; k++){
+            float a[WPT4], b[WPT4];
+            #pragma unroll
+            for(int w=0; w<WPT4; w++) a[w]=As[ty*WPT4+w][k];
+            #pragma unroll
+            for(int w=0; w<WPT4; w++) b[w]=Bs[k][tx*WPT4+w];
+            #pragma unroll
+            for(int wr=0; wr<WPT4; wr++)
+                #pragma unroll
+                for(int wc=0; wc<WPT4; wc++)
+                    sum[wr][wc] += a[wr]*b[wc];
+        }
+
+        __syncthreads();
+    }
+
+    #pragma unroll
+    for(int wr=0; wr<WPT4; wr++)
+        #pragma unroll
+        for(int wc=0; wc<WPT4; wc++){
+            int r=row0+wr, c=col0+wc;
+            if(r<N && c<N) C[r*N+c]=f32tof8(sum[wr][wc]);
+        }
+}
+
 void initMat(f8* A, int N){
     float tmp;
     for(int i = 0; i < N; i++){
@@ -227,13 +294,14 @@ float timeKernel(cudaEvent_t s, cudaEvent_t e){ float ms; cudaEventElapsedTime(&
 int main(){
     srand((unsigned)time(NULL));
 
-    f8 *A, *B, *C1, *C2, *C3, *C_cpu;
+    f8 *A, *B, *C1, *C2, *C3, *C4, *C_cpu;
     size_t bytes = (size_t)M * M;
     cudaMallocManaged(&A,     bytes);
     cudaMallocManaged(&B,     bytes);
     cudaMallocManaged(&C1,    bytes);
     cudaMallocManaged(&C2,    bytes);
     cudaMallocManaged(&C3,    bytes);
+    cudaMallocManaged(&C4,    bytes);
     cudaMallocManaged(&C_cpu, bytes);
 
     initMat(A, M*M);
@@ -277,12 +345,23 @@ int main(){
         printf("k3 reg-tile T=%-2d W=%d: %.3f ms\n", TILE3, WPT, timeKernel(start, stop));
     }
 
+    // ── k4 WPT=4, TILE=64, __ldg() on all global loads ──
+    {
+        dim3 bl(TL4/WPT4,TL4/WPT4),gr((M+TL4-1)/TL4,(M+TL4-1)/TL4);
+        cudaEventRecord(start);
+        mmul_k4<<<gr,bl>>>(A,B,C4,M);
+        cudaEventRecord(stop);
+        cudaDeviceSynchronize();
+        printf("k4 ldg T=%-2d W=%d: %.3f ms\n", TILE3, WPT, timeKernel(start, stop));
+    }
+
     // ── CPU reference + correctness ──
     printf("\nRunning CPU reference...\n");
     cpuMatMul(A, B, C_cpu, M);
     checkResult(C1, C_cpu, M, "k1");
     checkResult(C2, C_cpu, M, "k2");
     checkResult(C3, C_cpu, M, "k3");
+    checkResult(C4, C_cpu, M, "k4");
 
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
