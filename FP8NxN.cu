@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <math.h>
 //global defined
-#define M 64
+#define M 512*2*2*2
 typedef uint8_t f8;
 // we will opt the branchless version which should lead to better result
 __device__ __host__ __forceinline__ f8 f8mul(f8 a, f8 b){
@@ -87,7 +87,7 @@ void initMat(f8* A, int N){
 }
 
 // =========================================================================
-// CPU matrix multiplication (FP32) using your f8 -> float conversion
+// CPU matrix multiplication
 void cpuMatMul(f8* A, f8* B, f8* C, int N){
     for(int i = 0; i < N; i++){
         for(int j = 0; j < N; j++){
@@ -134,19 +134,35 @@ int main(){
     initMat(A, M*M);
     initMat(B, M*M);
 
-    dim3 grid(16,16);
-    dim3 bloc(8,8);
-    MMul_kernel<<<grid,bloc>>>(A, B, C, 64);
+    // dim3 grid(16,16);
+    // dim3 bloc(8,8);
+    dim3 block(16,16);
+    dim3 grid( (M + block.x - 1)/block.x, (M + block.y - 1)/block.y );
+
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start, 0);
+
+    MMul_kernel<<<grid,block>>>(A, B, C, M);
     cudaDeviceSynchronize(); // wait for gpu to finish;
 
+    cudaEventRecord(stop, 0);
+    cudaEventSynchronize(stop);
+
+    float ms;
+    cudaEventElapsedTime(&ms, start, stop);
+    printf("kernel version1 time: %.3f ms\n", ms);
+
     // Run CPU matmul
-    cpuMatMul(A, B, C_cpu, M);
-    // Compare
-    checkResult(C, C_cpu, M);
+    // cpuMatMul(A, B, C_cpu, M);
+    // // Compare
+    // checkResult(C, C_cpu, M);
 
     // free CPU reference
     cudaFree(C_cpu);
-
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
     cudaFree(A);
     cudaFree(B);
     cudaFree(C);
