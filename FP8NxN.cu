@@ -8,9 +8,10 @@
 #include <math.h>
 
 //global defined
-#define M 512/4
-#define TILE 32*4 // since this is int8 not float
-#define WPT 2// work per thread: each thread outputs wpt*wpt = 2x2 = 4 values
+#define M 512
+#define TILE 32 // since this is int8 not float
+#define TILE3 64
+#define WPT 4// work per thread: each thread outputs wpt*wpt = 2x2 = 4 values
 
 typedef uint8_t f8;
 // we will opt the branchless version which should lead to better result
@@ -76,7 +77,8 @@ __global__ void MMul_kernel(f8* A, f8* B, f8* C, int N){
     if(col >= N || row >= N) return;
     float sum = 0.0f;
     for(int k = 0; k < N; k++){
-        sum += f8tof32(f8mul(A[row*N+k], B[k*N + col]));
+        // sum += f8tof32(f8mul(A[row*N+k], B[k*N + col]));
+        sum += f8tof32(A[row*N+k]) * f8tof32(B[k*N + col]);
         // C[row*N + col] = f32tof8(sum);
     }
     C[row*N + col] = f32tof8(sum);
@@ -84,30 +86,27 @@ __global__ void MMul_kernel(f8* A, f8* B, f8* C, int N){
 
 // this is the 2nd version of the kernel hoping to optimize this
 __global__ void mmul_k2(f8* A, f8* B, f8* C, int N){
-    __shared__ f8 As[TILE][TILE];
-    __shared__ f8 Bs[TILE][TILE];
+    __shared__ f8 As[TILE][TILE+4];
+    __shared__ f8 Bs[TILE][TILE+4];
 
     int tx = threadIdx.x, ty = threadIdx.y;
     int row = blockIdx.y*TILE + ty;
     int col = blockIdx.x*TILE + tx;
 
-    if(col >= N || row >= N) return;
+    // if(col >= N || row >= N) return;
 
     float sum = 0.0f;
 
     for(int t = 0; t < (N + TILE - 1)/TILE; t++){
         int a_col = t * TILE + tx;
         int b_row = t * TILE + ty;
-        As[ty][tx] = (row < N && a_col < N)
-                     ? (A[row*N + a_col]) : 0.0f;
-        Bs[ty][tx] = (b_row < N && col < N)
-                     ? (B[b_row*N + col]) : 0.0f;
-
+        As[ty][tx] = (row  < N && a_col < N) ? A[row*N  + a_col] : 0;
+        Bs[ty][tx] = (b_row < N && col  < N) ? B[b_row*N + col ] : 0;
         __syncthreads();
 
         #pragma unroll
         for(int k = 0; k < TILE; k++)
-            sum += f8tof32(f8mul(As[ty][k], Bs[k][tx]));
+            sum += f8tof32(As[ty][k]) * f8tof32(Bs[k][tx]);
 
         __syncthreads();
     }
@@ -115,22 +114,71 @@ __global__ void mmul_k2(f8* A, f8* B, f8* C, int N){
         C[row*N + col] = f32tof8(sum);
 }
 
+
 // 3rd edition/opti
 __global__ void mmul_k3(f8* A, f8* B, f8* C, int N){
-    __shared__ f8 As[TILE][TILE+1];
-    __shared__ f8 Bs[TILE][TILE+1];
+    __shared__ f8 As[TILE3][TILE3+4];
+    __shared__ f8 Bs[TILE3][TILE3+4];
 
     int tx = threadIdx.x, ty = threadIdx.y;
 
-    int row0 = blockIdx.y * TILE + ty * WPT;
-    int col0 = blockIdx.x * TILE + tx * WPT;
+    int row0 = blockIdx.y * TILE3 + ty * WPT;
+    int col0 = blockIdx.x * TILE3 + tx * WPT;
 
     float sum[WPT][WPT] = {};
 
-    int num_tiles = (N + TILE - 1)/TILE;
+    int num_tiles = (N + TILE3 - 1)/TILE3;
 
     for(int t = 0; t < num_tiles; t++){
+        #pragma unroll
+        for(int i = 0; i < WPT; i++){
+            #pragma unroll
+            for(int j = 0; j < WPT; j++){
+                int ar = blockIdx.y * TILE3 + ty * WPT + i;
+                int ac = t * TILE3           + tx * WPT + j;
+                As[ty*WPT + i][tx*WPT + j] =
+                    (ar < N && ac < N) ? A[ar*N + ac] : 0;
 
+                int br = t * TILE3           + ty * WPT + i;
+                int bc = blockIdx.x * TILE3 + tx * WPT + j;
+                Bs[ty*WPT + i][tx*WPT + j] =
+                    (br < N && bc < N) ? B[br*N + bc] : 0;
+            }
+        }
+        __syncthreads();
+
+        // ── Compute: stream through k, reuse WPT rows of A and WPT cols of B ─
+        // The key: a[] and b[] stay in registers — no repeated shared mem reads
+        #pragma unroll
+        for(int k = 0; k < TILE3; k++){
+            float a[WPT], b[WPT];
+
+            #pragma unroll
+            for(int i = 0; i < WPT; i++)
+                a[i] = f8tof32(As[ty*WPT + i][k]);  // WPT rows of A for this thread
+
+            #pragma unroll
+            for(int j = 0; j < WPT; j++)
+                b[j] = f8tof32(Bs[k][tx*WPT + j]);  // WPT cols of B for this thread
+
+            // Outer product: WPT×WPT = 16 FMAs per k iteration, all in registers
+            #pragma unroll
+            for(int i = 0; i < WPT; i++)
+                #pragma unroll
+                for(int j = 0; j < WPT; j++)
+                    sum[i][j] += a[i] * b[j];
+        }
+        __syncthreads();
+    }
+    // ── Store 16 results back ─────────────────────────────────────────────────
+    #pragma unroll
+    for(int i = 0; i < WPT; i++){
+        #pragma unroll
+        for(int j = 0; j < WPT; j++){
+            int r = row0 + i, c = col0 + j;
+            if(r < N && c < N)
+                C[r*N + c] = f32tof8(sum[i][j]);
+        }
     }
 }
 
@@ -149,80 +197,95 @@ void cpuMatMul(f8* A, f8* B, f8* C, int N){
         for(int j = 0; j < N; j++){
             float sum = 0.0f;
             for(int k = 0; k < N; k++){
-                sum += f8tof32(f8mul(A[i*N+k], B[k*N + j]));
+                sum += f8tof32(A[i*N+k]) * f8tof32(B[k*N + j]);
             }
             C[i*N + j] = f32tof8(sum);  // store back as FP8
         }
     }
 }
 
-// Compare GPU vs CPU result
-void checkResult(f8* C_gpu, f8* C_cpu, int N){
+void checkResult(f8* C_gpu, f8* C_cpu, int N, const char* label){
     int errors = 0;
-    float maxError = 0.0f;
+    float maxErr = 0.0f;
     for(int i = 0; i < N*N; i++){
-        float gpuVal = f8tof32(C_gpu[i]);
-        float cpuVal = f8tof32(C_cpu[i]);
-        float err = fabsf(gpuVal - cpuVal);
-        if(err > 1e-2f){  // tolerance due to FP8 quantization
-            if(errors < 10) // print first few mismatches
-                printf("Mismatch at index %d: GPU=%.4f CPU=%.4f\n", i, gpuVal, cpuVal);
+        float g = f8tof32(C_gpu[i]), c = f8tof32(C_cpu[i]);
+        float e = fabsf(g - c);
+        if(e > 1e-2f){
+            if(errors < 5) printf("  [%s] idx %d: GPU=%.4f CPU=%.4f\n", label, i, g, c);
             errors++;
         }
-        if(err > maxError) maxError = err;
+        if(e > maxErr) maxErr = e;
     }
-    if(errors == 0)
-        printf("GPU and CPU results match!\n");
-    else
-        printf("Total mismatches: %d, max error: %.4f\n", errors, maxError);
+    if(errors == 0) printf("[%s] PASS  maxErr=%.4f\n", label, maxErr);
+    else            printf("[%s] FAIL  mismatches=%d  maxErr=%.4f\n", label, errors, maxErr);
 }
+
+float timeKernel(cudaEvent_t s, cudaEvent_t e){ float ms; cudaEventElapsedTime(&ms,s,e); return ms; }
+
 // =========================================================================
 
 int main(){
-    uint8_t* A = nullptr, *B = nullptr, *C = nullptr;
-    f8* C_cpu = nullptr;
+    srand((unsigned)time(NULL));
 
-    cudaMallocManaged(&A, M*M);
-    cudaMallocManaged(&B, M*M);
-    cudaMallocManaged(&C, M*M);
-    cudaMallocManaged(&C_cpu, M*M);  // CPU reference matrix
+    f8 *A, *B, *C1, *C2, *C3, *C_cpu;
+    size_t bytes = (size_t)M * M;
+    cudaMallocManaged(&A,     bytes);
+    cudaMallocManaged(&B,     bytes);
+    cudaMallocManaged(&C1,    bytes);
+    cudaMallocManaged(&C2,    bytes);
+    cudaMallocManaged(&C3,    bytes);
+    cudaMallocManaged(&C_cpu, bytes);
 
     initMat(A, M*M);
     initMat(B, M*M);
 
-    // dim3 grid(16,16);
-    // dim3 bloc(8,8);
-    dim3 block(16,16);
-    dim3 grid( (M + block.x - 1)/block.x, (M + block.y - 1)/block.y );
-
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
-    cudaEventRecord(start, 0);
 
-    // MMul_kernel<<<grid,block>>>(A, B, C, M);
-    mmul_k2<<<grid,block>>>(A,B,C,M);
-    cudaDeviceSynchronize(); // wait for gpu to finish;
+    // ── k1 naive ──
+    {
+        dim3 block(16, 16);
+        dim3 grid((M + 15)/16, (M + 15)/16);
+        cudaEventRecord(start);
+        MMul_kernel<<<grid, block>>>(A, B, C1, M);
+        cudaEventRecord(stop);
+        cudaDeviceSynchronize();
+        printf("k1 naive:           %.3f ms\n", timeKernel(start, stop));
+    }
 
-    cudaEventRecord(stop, 0);
-    cudaEventSynchronize(stop);
+    // ── k2 tiled (TILE=32) ──
+    // Block MUST be (TILE, TILE) — one thread per shared-mem cell
+    {
+        dim3 block(TILE, TILE);                        // 32×32 = 1024 threads
+        dim3 grid((M + TILE-1)/TILE, (M + TILE-1)/TILE);
+        cudaEventRecord(start);
+        mmul_k2<<<grid, block>>>(A, B, C2, M);
+        cudaEventRecord(stop);
+        cudaDeviceSynchronize();
+        printf("k2 tiled TILE=%-3d:  %.3f ms\n", TILE, timeKernel(start, stop));
+    }
 
-    float ms;
-    cudaEventElapsedTime(&ms, start, stop);
-    // printf("kernel version1 time: %.3f ms\n", ms);
-    printf("kernel version2 time: %.3f ms\n", ms);
+    // ── k3 register-tiled (TILE3=64, WPT=4) ──
+    {
+        dim3 block(TILE3/WPT, TILE3/WPT);             // 16×16 = 256 threads
+        dim3 grid((M + TILE3-1)/TILE3, (M + TILE3-1)/TILE3);
+        cudaEventRecord(start);
+        mmul_k3<<<grid, block>>>(A, B, C3, M);
+        cudaEventRecord(stop);
+        cudaDeviceSynchronize();
+        printf("k3 reg-tile T=%-2d W=%d: %.3f ms\n", TILE3, WPT, timeKernel(start, stop));
+    }
 
-    // Run CPU matmul
+    // ── CPU reference + correctness ──
+    printf("\nRunning CPU reference...\n");
     cpuMatMul(A, B, C_cpu, M);
-    // // Compare
-    checkResult(C, C_cpu, M);
+    checkResult(C1, C_cpu, M, "k1");
+    checkResult(C2, C_cpu, M, "k2");
+    checkResult(C3, C_cpu, M, "k3");
 
-    // free CPU reference
-    cudaFree(C_cpu);
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
-    cudaFree(A);
-    cudaFree(B);
-    cudaFree(C);
-    // should i do a cpu check here
+    cudaFree(A); cudaFree(B);
+    cudaFree(C1); cudaFree(C2); cudaFree(C3); cudaFree(C_cpu);
 }
