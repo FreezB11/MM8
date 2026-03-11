@@ -8,8 +8,9 @@
 #include <math.h>
 
 //global defined
-#define M 512*2*2*2
+#define M 512/4
 #define TILE 32*4 // since this is int8 not float
+#define WPT 2// work per thread: each thread outputs wpt*wpt = 2x2 = 4 values
 
 typedef uint8_t f8;
 // we will opt the branchless version which should lead to better result
@@ -95,14 +96,42 @@ __global__ void mmul_k2(f8* A, f8* B, f8* C, int N){
     float sum = 0.0f;
 
     for(int t = 0; t < (N + TILE - 1)/TILE; t++){
+        int a_col = t * TILE + tx;
+        int b_row = t * TILE + ty;
+        As[ty][tx] = (row < N && a_col < N)
+                     ? (A[row*N + a_col]) : 0.0f;
+        Bs[ty][tx] = (b_row < N && col < N)
+                     ? (B[b_row*N + col]) : 0.0f;
+
+        __syncthreads();
+
         #pragma unroll
         for(int k = 0; k < TILE; k++)
             sum += f8tof32(f8mul(As[ty][k], Bs[k][tx]));
 
         __syncthreads();
     }
-    // if(row < N && col < N)
-    C[row*N + col] = f32tof8(sum);
+    if(row < N && col < N)
+        C[row*N + col] = f32tof8(sum);
+}
+
+// 3rd edition/opti
+__global__ void mmul_k3(f8* A, f8* B, f8* C, int N){
+    __shared__ f8 As[TILE][TILE+1];
+    __shared__ f8 Bs[TILE][TILE+1];
+
+    int tx = threadIdx.x, ty = threadIdx.y;
+
+    int row0 = blockIdx.y * TILE + ty * WPT;
+    int col0 = blockIdx.x * TILE + tx * WPT;
+
+    float sum[WPT][WPT] = {};
+
+    int num_tiles = (N + TILE - 1)/TILE;
+
+    for(int t = 0; t < num_tiles; t++){
+
+    }
 }
 
 void initMat(f8* A, int N){
@@ -184,9 +213,9 @@ int main(){
     printf("kernel version2 time: %.3f ms\n", ms);
 
     // Run CPU matmul
-    // cpuMatMul(A, B, C_cpu, M);
+    cpuMatMul(A, B, C_cpu, M);
     // // Compare
-    // checkResult(C, C_cpu, M);
+    checkResult(C, C_cpu, M);
 
     // free CPU reference
     cudaFree(C_cpu);
