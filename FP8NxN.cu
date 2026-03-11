@@ -6,8 +6,11 @@
 #include <time.h>
 #include <stdio.h>
 #include <math.h>
+
 //global defined
 #define M 512*2*2*2
+#define TILE 32*4 // since this is int8 not float
+
 typedef uint8_t f8;
 // we will opt the branchless version which should lead to better result
 __device__ __host__ __forceinline__ f8 f8mul(f8 a, f8 b){
@@ -78,6 +81,30 @@ __global__ void MMul_kernel(f8* A, f8* B, f8* C, int N){
     C[row*N + col] = f32tof8(sum);
 }
 
+// this is the 2nd version of the kernel hoping to optimize this
+__global__ void mmul_k2(f8* A, f8* B, f8* C, int N){
+    __shared__ f8 As[TILE][TILE];
+    __shared__ f8 Bs[TILE][TILE];
+
+    int tx = threadIdx.x, ty = threadIdx.y;
+    int row = blockIdx.y*TILE + ty;
+    int col = blockIdx.x*TILE + tx;
+
+    if(col >= N || row >= N) return;
+
+    float sum = 0.0f;
+
+    for(int t = 0; t < (N + TILE - 1)/TILE; t++){
+        #pragma unroll
+        for(int k = 0; k < TILE; k++)
+            sum += f8tof32(f8mul(As[ty][k], Bs[k][tx]));
+
+        __syncthreads();
+    }
+    // if(row < N && col < N)
+    C[row*N + col] = f32tof8(sum);
+}
+
 void initMat(f8* A, int N){
     float tmp;
     for(int i = 0; i < N; i++){
@@ -144,7 +171,8 @@ int main(){
     cudaEventCreate(&stop);
     cudaEventRecord(start, 0);
 
-    MMul_kernel<<<grid,block>>>(A, B, C, M);
+    // MMul_kernel<<<grid,block>>>(A, B, C, M);
+    mmul_k2<<<grid,block>>>(A,B,C,M);
     cudaDeviceSynchronize(); // wait for gpu to finish;
 
     cudaEventRecord(stop, 0);
@@ -152,7 +180,8 @@ int main(){
 
     float ms;
     cudaEventElapsedTime(&ms, start, stop);
-    printf("kernel version1 time: %.3f ms\n", ms);
+    // printf("kernel version1 time: %.3f ms\n", ms);
+    printf("kernel version2 time: %.3f ms\n", ms);
 
     // Run CPU matmul
     // cpuMatMul(A, B, C_cpu, M);
