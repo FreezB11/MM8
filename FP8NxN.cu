@@ -70,6 +70,23 @@ __device__ __host__ __forceinline__ float f8tof32(f8 x){
     return sign ? -val : val;
 }
 
+// v_new: direct IEEE 754 bit construction — no ldexpf, no fmul
+// reconstruct the float's bit pattern directly:
+//   float bits = [sign(1)] [fp8_exp + 120 (8)] [fp8_mant << 20 (23)]
+//   fp8_exp + 120 = fp8_exp - 7 + 127  (convert fp8 bias to float bias)
+//   fp8_mant << 20 = left-align 3-bit mantissa into 23-bit float mantissa
+__device__ __forceinline__ float fp8_decode_fast(f8 x)
+{
+    if (x == 0) return 0.0f;
+    int sign = (x >> 7) & 1;
+    int exp  = (x >> 3) & 0xF;
+    int mant = x & 0x7;
+    // build IEEE 754 float bit pattern directly
+    // float exponent field = fp8_exp - 7 + 127 = fp8_exp + 120
+    unsigned int bits = (sign << 31) | ((exp + 120) << 23) | (mant << 20);
+    return __int_as_float(bits);
+}
+
 // first i will write a naive kernel
 __global__ void MMul_kernel(f8* A, f8* B, f8* C, int N){
     int row = blockIdx.y*blockDim.y + threadIdx.y;
@@ -249,6 +266,60 @@ __global__ void mmul_k4(f8* A, f8* B, f8* C, int N){
         }
 }
 
+// i will try to improve this more with k5
+#define TILE5 64
+__launch_bounds__(TILE5/WPT * TILE5/WPT, 4)
+__global__ void mmul_k5(f8* A, f8* B, f8* C, int N){
+    __shared__ float As[TILE5][TILE5+1], Bs[TILE5][TILE5+1];
+    int tx=threadIdx.x, ty=threadIdx.y;
+    int row0=blockIdx.y*TILE5+ty*WPT, col0=blockIdx.x*TILE5+tx*WPT;
+    float sum[WPT][WPT]={};
+    for(int t=0;t<(N+TILE5-1)/TILE5;t++){
+        #pragma unroll
+        for(int wr=0;wr<WPT;wr++){
+            int ar=row0+wr;
+            #pragma unroll
+            for(int wc=0;wc<WPT;wc++){
+                int ac=t*TILE5+tx*WPT+wc;
+                // fast decode — direct IEEE 754 bit construction
+                As[ty*WPT+wr][tx*WPT+wc]=(ar<N&&ac<N)?fp8_decode_fast(__ldg(&A[ar*N+ac])):0;
+            }
+        }
+        #pragma unroll
+        for(int wr=0;wr<WPT;wr++){
+            int br=t*TILE5+ty*WPT+wr;
+            #pragma unroll
+            for(int wc=0;wc<WPT;wc++){
+                int bc=col0+wc;
+                Bs[ty*WPT+wr][tx*WPT+wc]=(br<N&&bc<N)?fp8_decode_fast(__ldg(&B[br*N+bc])):0;
+            }
+        }
+        __syncthreads();
+
+        #pragma unroll
+        for(int k=0;k<TILE5;k++){
+            float a[WPT],b[WPT];
+            #pragma unroll
+            for(int w=0;w<WPT;w++) a[w]=As[ty*WPT+w][k];
+            #pragma unroll
+            for(int w=0;w<WPT;w++) b[w]=Bs[k][tx*WPT+w];
+            #pragma unroll
+            for(int wr=0;wr<WPT;wr++)
+                #pragma unroll
+                for(int wc=0;wc<WPT;wc++)
+                    sum[wr][wc]+=a[wr]*b[wc];
+        }
+        __syncthreads();
+    }
+    #pragma unroll
+    for(int wr=0;wr<WPT;wr++)
+        #pragma unroll
+        for(int wc=0;wc<WPT;wc++){
+            int r=row0+wr,c=col0+wc;
+            if(r<N&&c<N) C[r*N+c]=f32tof8(sum[wr][wc]);
+        }
+}
+
 void initMat(f8* A, int N){
     float tmp;
     for(int i = 0; i < N; i++){
@@ -294,7 +365,7 @@ float timeKernel(cudaEvent_t s, cudaEvent_t e){ float ms; cudaEventElapsedTime(&
 int main(){
     srand((unsigned)time(NULL));
 
-    f8 *A, *B, *C1, *C2, *C3, *C4, *C_cpu;
+    f8 *A, *B, *C1, *C2, *C3, *C4, *C5, *C_cpu;
     size_t bytes = (size_t)M * M;
     cudaMallocManaged(&A,     bytes);
     cudaMallocManaged(&B,     bytes);
@@ -302,6 +373,7 @@ int main(){
     cudaMallocManaged(&C2,    bytes);
     cudaMallocManaged(&C3,    bytes);
     cudaMallocManaged(&C4,    bytes);
+    cudaMallocManaged(&C5,    bytes);
     cudaMallocManaged(&C_cpu, bytes);
 
     initMat(A, M*M);
@@ -355,6 +427,16 @@ int main(){
         printf("k4 ldg T=%-2d W=%d: %.3f ms\n", TILE3, WPT, timeKernel(start, stop));
     }
 
+    // ── k5  ──
+    {
+        dim3 bl(TILE5/WPT,TILE5/WPT),gr((M+TILE5-1)/TILE5,(M+TILE-1)/TILE5);
+        cudaEventRecord(start);
+        mmul_k4<<<gr,bl>>>(A,B,C5,M);
+        cudaEventRecord(stop);
+        cudaDeviceSynchronize();
+        printf("k5 T=%-2d W=%d: %.3f ms\n", TILE5, WPT, timeKernel(start, stop));
+    }
+
     // ── CPU reference + correctness ──
     printf("\nRunning CPU reference...\n");
     cpuMatMul(A, B, C_cpu, M);
@@ -362,9 +444,10 @@ int main(){
     checkResult(C2, C_cpu, M, "k2");
     checkResult(C3, C_cpu, M, "k3");
     checkResult(C4, C_cpu, M, "k4");
+    checkResult(C5, C_cpu, M, "k4");
 
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
     cudaFree(A); cudaFree(B);
-    cudaFree(C1); cudaFree(C2); cudaFree(C3); cudaFree(C_cpu);
+    cudaFree(C1); cudaFree(C2); cudaFree(C3); cudaFree(C4); cudaFree(C5); cudaFree(C_cpu);
 }
