@@ -70,3 +70,8 @@ weight master copy | BF16    | range matches FP32
 layer norm / softmax | FP32  | numerically sensitive
 
 in the fp8 file, using a predefined 2d matrix to lookup was a AI idea so yea no credits to me in that.
+
+
+totally a random line
+cudnt work and will hopefully continue sooon
+well i did add k4 k5 it is not that fast yet atleast i dont like it 
