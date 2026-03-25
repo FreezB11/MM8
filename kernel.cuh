@@ -14,39 +14,14 @@ E5M2	57k	    ~1e-5	        Better range
 #include <stdint.h>
 typedef uint8_t f8;
 
-/// @brief this kernel is taking the assumptions that the matrix is square
-/// @param A input mat_A
-/// @param B input mat_B
-/// @param C output mat_C
-/// @param N matrix dimension
-/// @return we will return the matrix C with the multiplied values
-__global__ void mm8(f8* A, f8* B, f8* C, int N){
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-    if(col >= N || row >= N) return;
-    /*
-        sum = 0
-        for k -> [0->N] :
-            sum += A[row*N + k] * B[k*N + col]
-        C[row*N + col] = sum
-    */
-    
+__device__ __host__ __forceinline__ float f8tof32(f8 x){
+    int sign = (x >> 7) & 1;
+    int exp  = (x >> 3) & 0xF;
+    int mant = x & 0x7;
+    if (exp == 0 && mant == 0) return 0.0f;
+    float val = ldexpf(1.0f + mant * 0.125f, exp - 7);
+    return sign ? -val : val;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 __device__ __host__ __forceinline__ f8 f32tof8(float x){
     if(x==0.0f) return 0;
@@ -72,4 +47,27 @@ __device__ __host__ __forceinline__ f8 f32tof8(float x){
     if(exp8 >= 15) exp8 = 15;
 
     return (sign << 7) | (exp8 << 3) | (mant & 0x7);
+}
+
+/// @brief this kernel is taking the assumptions that the matrix is square
+/// @param A input mat_A
+/// @param B input mat_B
+/// @param C output mat_C
+/// @param N matrix dimension
+/// @return we will return the matrix C with the multiplied values
+__global__ void mm8(f8* A, f8* B, f8* C, int N){
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if(col >= N || row >= N) return;
+    /*
+        sum = 0
+        for k -> [0->N] :
+            sum += A[row*N + k] * B[k*N + col]
+        C[row*N + col] = sum
+    */
+    float sum = 0;
+    for(int k = 0; k < N; k++){
+        sum += f8tof32(A[row*N+k]) * f8tof32(B[k*N + col]);
+    }
+    C[row*N + col] = f32tof8(sum);
 }
