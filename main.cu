@@ -1,19 +1,13 @@
+///@file:main.cu 
+///@note this file will not have much updates
+///      we will keep the kernels in the .cuh file
+///      so we just edit and improve that
+
 #include "kernel.cuh"
 #include <stdio.h>
 
-void initMat(f8* A, int N){
-    float tmp;
-    for(int i = 0; i < N; i++){
-        tmp = (float)rand() / (float)RAND_MAX;
-        A[i] = f32tof8(tmp);
-    }
-}
-
-float timeKernel(cudaEvent_t s, cudaEvent_t e){ 
-    float ms; 
-    cudaEventElapsedTime(&ms,s,e); 
-    return ms; 
-}
+void initMat(f8* A, int N){float tmp;for(int i = 0; i < N; i++){tmp = (float)rand() / (float)RAND_MAX;A[i] = f32tof8(tmp);}}
+float timeKernel(cudaEvent_t s, cudaEvent_t e){ float ms; cudaEventElapsedTime(&ms,s,e); return ms; }
 
 int main(){
     srand((unsigned)time(NULL));
@@ -44,4 +38,7 @@ int main(){
     }
 
     cudaDeviceSynchronize();
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+    cudaFree(A); cudaFree(B); cudaFree(C);
 }
