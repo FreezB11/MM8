@@ -19,11 +19,11 @@ int main(){
     srand((unsigned)time(NULL));
 
     f8 *A, *B, *C;
-    int N = 1024;
+    int N = 1024*4;
 
-    cudaMalloc(&A, N*N*sizeof(f8));
-    cudaMalloc(&B, N*N*sizeof(f8));
-    cudaMalloc(&C, N*N*sizeof(f8));
+    cudaMallocManaged(&A, N*N*sizeof(f8));
+    cudaMallocManaged(&B, N*N*sizeof(f8));
+    cudaMallocManaged(&C, N*N*sizeof(f8));
 
     initMat(A, N*N);
     initMat(B, N*N);
