@@ -28,8 +28,8 @@ int main(){
 
     // mm8<<<(N+255)/256, 256>>>(A,B,C,N);
     {
-        dim3 block(16,16);
-        dim3 grid((N+15)/16, (N+15)/16);
+        dim3 block(32,32);
+        dim3 grid((N+31)/32, (N+31)/32);
         cudaEventRecord(start);
         mm8<<<grid, block>>>(A, B, C, N);
         cudaEventRecord(stop);
