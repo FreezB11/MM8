@@ -13,6 +13,7 @@ E5M2	57k	    ~1e-5	        Better range
 */
 #include <stdint.h>
 typedef uint8_t f8;
+#define TILE 64
 
 __device__ __host__ __forceinline__ float f8tof32(f8 x){
     int sign = (x >> 7) & 1;
@@ -56,9 +57,13 @@ __device__ __host__ __forceinline__ f8 f32tof8(float x){
 /// @param N matrix dimension
 /// @return we will return the matrix C with the multiplied values
 __global__ void mm8(f8* A, f8* B, f8* C, int N){
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-    if(col >= N || row >= N) return;
+    __shared__ float As[TILE][TILE+4];
+    __shared__ float Bs[TILE][TILE+4];
+
+    int tx = threadIdx.x, ty = threadIdx.y;
+    int row = blockIdx.y*TILE + ty;
+    int col = blockIdx.x*TILE + tx;
+
     /*
         sum = 0
         for k -> [0->N] :
@@ -66,8 +71,19 @@ __global__ void mm8(f8* A, f8* B, f8* C, int N){
         C[row*N + col] = sum
     */
     float sum = 0;
-    for(int k = 0; k < N; k++){
-        sum += f8tof32(A[row*N+k]) * f8tof32(B[k*N + col]);
+    for(int t = 0; t < (N + TILE - 1)/TILE; t++){
+        int a_col = t * TILE + tx;
+        int b_row = t * TILE + ty;
+        As[ty][tx] = (row < N && a_col < N) ? f8tof32(A[row*N + a_col]) : 0;
+        Bs[ty][tx] = (b_row < N && col < N) ? f8tof32(B[b_row*N + col]) : 0;
+        __syncthreads();
+
+        #pragma unroll
+        for(int k = 0; k < TILE; k++){
+            sum += As[ty][k] + Bs[k][tx];
+        }
+        __syncthreads();
     }
-    C[row*N + col] = f32tof8(sum);
+    if(row < N && col < N)
+        C[row*N + col] = f32tof8(sum);
 }
