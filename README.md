@@ -76,5 +76,6 @@ totally a random line
 cudnt work and will hopefully continue sooon
 well i did add k4 k5 it is not that fast yet atleast i dont like it 
 
-the base line plot 
-![image](gflops_plot.png)
+the base line plot with my mm8 version3
+![image](data+plot/gflops_plot.png)
+![img](data+plot/bench.png)
