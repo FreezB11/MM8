@@ -11,7 +11,7 @@
 #define CHECK_CUDA(x) if((x)!=cudaSuccess){printf("CUDA error at %d\n",__LINE__); return -1;}
 #define CHECK_CUBLAS(x) if((x)!=CUBLAS_STATUS_SUCCESS){printf("CUBLAS error at %d\n",__LINE__); return -1;}
 
-int SIZES[] = {16, 64, 256, 512, 1024, 2048, 4096, 8192};
+int SIZES[] = {16, 64, 256, 512, 1024, 2048, 4096, 8192, 16384};
 int NUM_SIZES = sizeof(SIZES)/sizeof(SIZES[0]);
 
 double flops(int N, double ms)
