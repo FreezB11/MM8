@@ -72,7 +72,7 @@ __device__ __host__ __forceinline__ f8 f32tof8(float x){
 
     int sign  = (bits >> 31) & 1;
     int fexp  = (bits >> 23) & 0xFF;
-    int fmant = (bits >> 23) & 0x7FFFFF;  // not needed, just for clamping
+    // int fmant = (bits >> 23) & 0x7FFFFF;  // not needed, just for clamping
 
     if(fexp == 0) return (sign << 7);          // zero / denormal → zero
     if(x != x)   return 0;                     // nan → zero
@@ -86,153 +86,15 @@ __device__ __host__ __forceinline__ f8 f32tof8(float x){
     return (sign << 7) | (exp8 << 3) | mant8;
 }
 
-/// @brief this kernel is taking the assumptions that the matrix is square
-/// @param A input mat_A
-/// @param B input mat_B
-/// @param C output mat_C
-/// @param N matrix dimension
-/// @return we will return the matrix C with the multiplied values
-__global__ void mm8(f8* A, f8* B, f8* C, int N){
-    __shared__ float As[TILE][TILE+4];
-    __shared__ float Bs[TILE][TILE+4];
-
-    int tx = threadIdx.x, ty = threadIdx.y;
-    int row = blockIdx.y*TILE + ty*WPT;
-    int col = blockIdx.x*TILE + tx*WPT;
-
-    float sum[WPT][WPT] = {};
-    /*
-        sum = 0
-        for k -> [0->N] :
-            sum += A[row*N + k] * B[k*N + col]
-        C[row*N + col] = sum
-    */
-    // float sum = 0;
-    for(int t = 0; t < (N + TILE - 1)/TILE; t++){
-        #pragma unroll
-        for(int i = 0; i < WPT; i++){
-            #pragma unroll
-            for(int j = 0; j < WPT; j++){
-                int ar = blockIdx.y*TILE + ty*WPT + i;
-                int ac = t * TILE + tx * WPT + j;
-                As[ty * WPT + i][tx * WPT + j] = (ar < N && ac < N) ? f8tof32(A[ar*N + ac]) : 0;
-                int br = t * TILE + ty * WPT + i;
-                int bc = blockIdx.x*TILE + tx*WPT + j;
-                Bs[ty * WPT + i][tx * WPT + j] = (br < N && bc < N) ? f8tof32(B[br*N + bc]) : 0;
-            }
-        }
-        __syncthreads();
-
-        #pragma unroll
-        for(int k = 0; k < TILE; k++){
-            float a[WPT], b[WPT];
-            #pragma unroll
-            for(int i = 0; i < WPT; i++)
-                a[i] = As[ty*WPT + i][k];
-            #pragma unroll
-            for(int j = 0; j < WPT; j++)
-                b[j] = Bs[k][tx*WPT + j];
-
-            #pragma unroll
-            for(int i = 0; i < WPT; i++){
-                #pragma unroll
-                for(int j = 0; j < WPT; j++){
-                    sum[i][j] += a[i] * b[j];
-                }
-            }
-        }
-        __syncthreads();
-    }
-    #pragma unroll
-    for(int i = 0; i < WPT; i++){
-        #pragma unroll
-        for(int j = 0; j < WPT; j++){
-            int r = row + i, c = col + j;
-            if(r < N && c < N)
-                C[r*N + c] = f32tof8(sum[i][j]);
-        }
-    }
-}
-
-__global__ void mm82(f8* A, f8* B, f8* C, int N){
-    __shared__ f8    As_raw[TILE][TILE];
-    __shared__ f8    Bs_raw[TILE][TILE];
-    __shared__ float As[TILE][TILE+4];
-    __shared__ float Bs[TILE][TILE+4];
-
-    int tx = threadIdx.x, ty = threadIdx.y;
-    int row = blockIdx.y*TILE + ty*WPT;
-    int col = blockIdx.x*TILE + tx*WPT;
-
-    float sum[WPT][WPT] = {};
-
-    for(int t = 0; t < (N + TILE - 1)/TILE; t++){
-
-        // --- phase 1: raw byte loads only, no conversion ---
-        #pragma unroll
-        for(int i = 0; i < WPT; i++){
-            #pragma unroll
-            for(int j = 0; j < WPT; j++){
-                int ar = blockIdx.y*TILE + ty*WPT + i;
-                int ac = t*TILE + tx*WPT + j;
-                As_raw[ty*WPT+i][tx*WPT+j] = (ar<N && ac<N) ? __ldg(&A[ar*N+ac]) : 0;
-
-                int br = t*TILE + ty*WPT + i;
-                int bc = blockIdx.x*TILE + tx*WPT + j;
-                Bs_raw[ty*WPT+i][tx*WPT+j] = (br<N && bc<N) ? __ldg(&B[br*N+bc]) : 0;
-            }
-        }
-        __syncthreads();
-
-        // --- phase 2: convert raw bytes to float in smem ---
-        #pragma unroll
-        for(int i = 0; i < WPT; i++){
-            #pragma unroll
-            for(int j = 0; j < WPT; j++){
-                As[ty*WPT+i][tx*WPT+j] = f8tof32(As_raw[ty*WPT+i][tx*WPT+j]);
-                Bs[ty*WPT+i][tx*WPT+j] = f8tof32(Bs_raw[ty*WPT+i][tx*WPT+j]);
-            }
-        }
-        __syncthreads();
-
-        // --- phase 3: compute (unchanged) ---
-        #pragma unroll
-        for(int k = 0; k < TILE; k++){
-            float a[WPT], b[WPT];
-            #pragma unroll
-            for(int i = 0; i < WPT; i++)
-                a[i] = As[ty*WPT+i][k];
-            #pragma unroll
-            for(int j = 0; j < WPT; j++)
-                b[j] = Bs[k][tx*WPT+j];
-
-            #pragma unroll
-            for(int i = 0; i < WPT; i++){
-                #pragma unroll
-                for(int j = 0; j < WPT; j++){
-                    sum[i][j] += a[i] * b[j];
-                }
-            }
-        }
-        __syncthreads();
-    }
-
-    // --- writeback ---
-    #pragma unroll
-    for(int i = 0; i < WPT; i++){
-        #pragma unroll
-        for(int j = 0; j < WPT; j++){
-            int r = row+i, c = col+j;
-            if(r < N && c < N)
-                C[r*N+c] = f32tof8(sum[i][j]);
-        }
-    }
-}
-
+/// @brief this is the version where i cud do all that i know just tiling vector loading and that
+/// @param A input mat
+/// @param B input mat
+/// @param C ouput 
+/// @param N assuming it is a square matrix
+/// @return 
 __global__ void mm83(f8* __restrict__ A, f8* __restrict__ B, f8* __restrict__ C, int N){
-    __shared__ f8 As[TILE][TILE];    // 4096 bytes
-    __shared__ f8 Bs[TILE][TILE];    // 4096 bytes
-    // total: 8KB vs 34KB — allows 4+ blocks per SM
+    __shared__ float As[TILE][TILE];
+    __shared__ float Bs[TILE][TILE];
 
     int tx = threadIdx.x, ty = threadIdx.y;
     int row = blockIdx.y*TILE + ty*WPT;
@@ -242,30 +104,50 @@ __global__ void mm83(f8* __restrict__ A, f8* __restrict__ B, f8* __restrict__ C,
 
     for(int t = 0; t < (N + TILE - 1)/TILE; t++){
 
-        // load raw f8 bytes — no conversion yet
         #pragma unroll
         for(int i = 0; i < WPT; i++){
-            #pragma unroll
-            for(int j = 0; j < WPT; j++){
-                int ar = blockIdx.y*TILE + ty*WPT + i, ac = t*TILE + tx*WPT + j;
-                As[ty*WPT+i][tx*WPT+j] = (ar<N && ac<N) ? __ldg(&A[ar*N+ac]) : 0;
+            // --- A tile: 4 bytes in one load ---
+            int ar = blockIdx.y*TILE + ty*WPT + i;
+            int ac = t*TILE + tx*WPT;           // base col, WPT=4 cols at once
 
-                int br = t*TILE + ty*WPT + i, bc = blockIdx.x*TILE + tx*WPT + j;
-                Bs[ty*WPT+i][tx*WPT+j] = (br<N && bc<N) ? __ldg(&B[br*N+bc]) : 0;
-            }
+            uint32_t a4 = (ar < N && ac+3 < N)
+                        ? *(uint32_t*)(&A[ar*N + ac])
+                        : 0u;
+
+            As[ty*WPT+i][tx*WPT+0] = f8tof32((a4 >>  0) & 0xFF);
+            As[ty*WPT+i][tx*WPT+1] = f8tof32((a4 >>  8) & 0xFF);
+            As[ty*WPT+i][tx*WPT+2] = f8tof32((a4 >> 16) & 0xFF);
+            As[ty*WPT+i][tx*WPT+3] = f8tof32((a4 >> 24) & 0xFF);
+
+            // --- B tile: 4 bytes in one load ---
+            int br = t*TILE + ty*WPT + i;
+            int bc = blockIdx.x*TILE + tx*WPT;
+
+            uint32_t b4 = (br < N && bc+3 < N)
+                        ? *(uint32_t*)(&B[br*N + bc])
+                        : 0u;
+
+            Bs[ty*WPT+i][tx*WPT+0] = f8tof32((b4 >>  0) & 0xFF);
+            Bs[ty*WPT+i][tx*WPT+1] = f8tof32((b4 >>  8) & 0xFF);
+            Bs[ty*WPT+i][tx*WPT+2] = f8tof32((b4 >> 16) & 0xFF);
+            Bs[ty*WPT+i][tx*WPT+3] = f8tof32((b4 >> 24) & 0xFF);
         }
         __syncthreads();
 
-        // convert f8→f32 inline during compute — smem reads are free vs gmem
         #pragma unroll
         for(int k = 0; k < TILE; k++){
             float a[WPT], b[WPT];
+            // #pragma unroll
+            // for(int i = 0; i < WPT; i++)
+            //     a[i] = As[ty*WPT+i][k];
+            // #pragma unroll
+            // for(int j = 0; j < WPT; j++)
+            //     b[j] = Bs[k][tx*WPT+j];
             #pragma unroll
-            for(int i = 0; i < WPT; i++)
-                a[i] = f8tof32(As[ty*WPT+i][k]);   // convert here not at load
-            #pragma unroll
-            for(int j = 0; j < WPT; j++)
-                b[j] = f8tof32(Bs[k][tx*WPT+j]);
+            for(int i = 0; i < WPT; i++){
+                a[i] = As[ty*WPT + i][k];
+                b[i] = Bs[k][tx*WPT + i];
+            }
 
             #pragma unroll
             for(int i = 0; i < WPT; i++)
@@ -281,6 +163,7 @@ __global__ void mm83(f8* __restrict__ A, f8* __restrict__ B, f8* __restrict__ C,
         #pragma unroll
         for(int j = 0; j < WPT; j++){
             int r = row+i, c = col+j;
-            if(r < N && c < N) C[r*N+c] = f32tof8(sum[i][j]);
+            if(r < N && c < N)
+                C[r*N+c] = f32tof8(sum[i][j]);
         }
 }
