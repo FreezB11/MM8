@@ -31,8 +31,6 @@ int main(){
 
     // --- warmup: run both once, discard timing ---
     mm83<<<grid, block>>>(A, B, C, N); cudaDeviceSynchronize();
-    mm82<<<grid, block>>>(A, B, C, N); cudaDeviceSynchronize();
-
     // --- real benchmark: run each 5x, average ---
     float t1 = 0, t2 = 0;
     int RUNS = 15;
@@ -45,26 +43,10 @@ int main(){
         t1 += timeKernel(start, stop);
     }
 
-    for(int i = 0; i < RUNS; i++){
-        cudaEventRecord(start);
-        mm82<<<grid, block>>>(A, B, C, N);
-        cudaEventRecord(stop);
-        cudaDeviceSynchronize();
-        t2 += timeKernel(start, stop);
-    }
-
     printf("mm83  avg: %.3f ms\n", t1/RUNS);
-    printf("mm82 avg: %.3f ms\n", t2/RUNS);
 
     // swap order and run again to confirm
     t1 = 0; t2 = 0;
-    for(int i = 0; i < RUNS; i++){
-        cudaEventRecord(start);
-        mm82<<<grid, block>>>(A, B, C, N);
-        cudaEventRecord(stop);
-        cudaDeviceSynchronize();
-        t2 += timeKernel(start, stop);
-    }
     for(int i = 0; i < RUNS; i++){
         cudaEventRecord(start);
         mm83<<<grid, block>>>(A, B, C, N);
@@ -74,7 +56,6 @@ int main(){
     }
     printf("--- order swapped ---\n");
     printf("mm83  avg: %.3f ms\n", t1/RUNS);
-    printf("mm82 avg: %.3f ms\n", t2/RUNS);
 
     int blocks_per_sm;
     cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_sm, mm83, 256, 0);
