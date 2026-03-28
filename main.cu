@@ -23,21 +23,84 @@ int main(){
     initMat(B, N*N);
 
     cudaEvent_t start, stop;
+    // cudaEventCreate(&start);
+    // cudaEventCreate(&stop);
+
+    // // mm8<<<(N+255)/256, 256>>>(A,B,C,N);
+    // {
+    //     // dim3 block(32,32);
+    //     dim3 block(TILE/WPT,TILE/WPT);
+    //     // dim3 grid((N+31)/32, (N+31)/32);
+    //     dim3 grid((N+TILE-1)/TILE, (N+TILE-1)/TILE);
+    //     cudaEventRecord(start);
+    //     mm8<<<grid, block>>>(A, B, C, N);
+    //     cudaEventRecord(stop);
+    //     cudaDeviceSynchronize();
+    //     printf("mm8:           %.3f ms\n", timeKernel(start, stop));
+    // }
+    // {
+    //     // dim3 block(32,32);
+    //     dim3 block(TILE/WPT,TILE/WPT);
+    //     // dim3 grid((N+31)/32, (N+31)/32);
+    //     dim3 grid((N+TILE-1)/TILE, (N+TILE-1)/TILE);
+    //     cudaEventRecord(start);
+    //     mm82<<<grid, block>>>(A, B, C, N);
+    //     cudaEventRecord(stop);
+    //     cudaDeviceSynchronize();
+    //     printf("mm82:           %.3f ms\n", timeKernel(start, stop));
+    // }
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
 
-    // mm8<<<(N+255)/256, 256>>>(A,B,C,N);
-    {
-        // dim3 block(32,32);
-        dim3 block(16,16);
-        // dim3 grid((N+31)/32, (N+31)/32);
-        dim3 grid((N+15)/16, (N+15)/16);
+    dim3 block(TILE/WPT, TILE/WPT);
+    dim3 grid((N+TILE-1)/TILE, (N+TILE-1)/TILE);
+
+    // --- warmup: run both once, discard timing ---
+    mm8 <<<grid, block>>>(A, B, C, N); cudaDeviceSynchronize();
+    mm82<<<grid, block>>>(A, B, C, N); cudaDeviceSynchronize();
+
+    // --- real benchmark: run each 5x, average ---
+    float t1 = 0, t2 = 0;
+    int RUNS = 5;
+
+    for(int i = 0; i < RUNS; i++){
         cudaEventRecord(start);
         mm8<<<grid, block>>>(A, B, C, N);
         cudaEventRecord(stop);
         cudaDeviceSynchronize();
-        printf("mm8:           %.3f ms\n", timeKernel(start, stop));
+        t1 += timeKernel(start, stop);
     }
+
+    for(int i = 0; i < RUNS; i++){
+        cudaEventRecord(start);
+        mm82<<<grid, block>>>(A, B, C, N);
+        cudaEventRecord(stop);
+        cudaDeviceSynchronize();
+        t2 += timeKernel(start, stop);
+    }
+
+    printf("mm8  avg: %.3f ms\n", t1/RUNS);
+    printf("mm82 avg: %.3f ms\n", t2/RUNS);
+
+    // swap order and run again to confirm
+    t1 = 0; t2 = 0;
+    for(int i = 0; i < RUNS; i++){
+        cudaEventRecord(start);
+        mm82<<<grid, block>>>(A, B, C, N);
+        cudaEventRecord(stop);
+        cudaDeviceSynchronize();
+        t2 += timeKernel(start, stop);
+    }
+    for(int i = 0; i < RUNS; i++){
+        cudaEventRecord(start);
+        mm8<<<grid, block>>>(A, B, C, N);
+        cudaEventRecord(stop);
+        cudaDeviceSynchronize();
+        t1 += timeKernel(start, stop);
+    }
+    printf("--- order swapped ---\n");
+    printf("mm8  avg: %.3f ms\n", t1/RUNS);
+    printf("mm82 avg: %.3f ms\n", t2/RUNS);
 
     cudaDeviceSynchronize();
     cudaEventDestroy(start);
