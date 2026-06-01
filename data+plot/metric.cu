@@ -64,7 +64,7 @@ int main(){
 
         // warmup
         for(int i = 0; i < WARMUP; i++)
-            mm83<<<grid, block>>>(A, B, C, N);
+            mm84<<<grid, block>>>(A, B, C, N);
         cudaDeviceSynchronize();
 
         if(cudaGetLastError() != cudaSuccess){
@@ -79,7 +79,7 @@ int main(){
         for(int i = 0; i < RUNS; i++){
             float ms;
             cudaEventRecord(start);
-            mm83<<<grid, block>>>(A, B, C, N);
+            mm84<<<grid, block>>>(A, B, C, N);
             cudaEventRecord(stop);
             cudaEventSynchronize(stop);
             cudaEventElapsedTime(&ms, start, stop);

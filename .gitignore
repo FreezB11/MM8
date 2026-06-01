@@ -9,3 +9,4 @@ test
 fp8_break
 baseline
 main
+fp8_gemm
